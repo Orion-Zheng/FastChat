@@ -16,8 +16,38 @@ from tqdm import tqdm
 from fastchat.llm_judge.common import load_questions, temperature_config
 from fastchat.model import load_model, get_conversation_template
 from fastchat.utils import str_to_torch_dtype
+from transformers import AutoTokenizer, T5Tokenizer, AutoConfig, AutoModelForCausalLM, LogitsProcessorList, LogitsProcessor
 
+class StopAfterEosTextGenerated(LogitsProcessor):
+        """Logits processor (to use with HuggingFace `generate()` method :
+        https://huggingface.co/docs/transformers/v4.24.0/en/main_classes/
+        text_generation#transformers.generation_utils.GenerationMixin).
 
+        This logit processor simply ensure that we generate at least one letter
+        other than space, and that we don't generate anything after generating
+        a space (in order to generate single word).
+
+        Args:
+            base_len (int): Size of the given context. Used to know if this is
+                the first character to generate.
+            eos_token_id (int): ID of the EOS token.
+        """
+        def __init__(self, base_len: int, eos_token_id: int):
+            super().__init__()
+            self.base_len = base_len
+            self.eos_token_id = eos_token_id
+
+        def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
+            if input_ids.size(1) > self.base_len:
+                forced_eos = torch.full((scores.size(1),), -float("inf")).to(scores.device)
+                forced_eos[self.eos_token_id] = 0 
+                
+                # If the last tokens of input_ids is the stop_token_ids, a eos will forced to generate sequencially
+                stop_token_ids = torch.Tensor([15501, 281, 926]).to(scores.device)
+                stop_sample_ids = torch.eq(input_ids[:, -len(stop_token_ids): ], stop_token_ids).all(dim=1)
+                scores[stop_sample_ids] = forced_eos
+            return scores
+        
 def run_eval(
     model_path,
     model_id,
@@ -35,7 +65,7 @@ def run_eval(
 ):
     questions = load_questions(question_file, question_begin, question_end)
     # random shuffle the questions to balance the loading
-    random.shuffle(questions)
+#     random.shuffle(questions)
 
     # Split the question file into `num_gpus` files
     assert num_gpus_total % num_gpus_per_model == 0
@@ -94,7 +124,8 @@ def get_model_answers(
         cpu_offloading=False,
         debug=False,
     )
-
+    verbose = True
+    MAX_NEW_TOKEN = max_new_token
     for question in tqdm(questions):
         if question["category"] in temperature_config:
             temperature = temperature_config[question["category"]]
@@ -111,26 +142,51 @@ def get_model_answers(
                 conv.append_message(conv.roles[0], qs)
                 conv.append_message(conv.roles[1], None)
                 prompt = conv.get_prompt()
-                input_ids = tokenizer([prompt]).input_ids
+                
+                inputs = tokenizer([prompt],
+                                   split_special_tokens=False,
+                                   return_tensors="pt")
+                input_ids = inputs.input_ids.to(model.device)
+                attention_mask = inputs.attention_mask.to(model.device)
+                base_len = inputs.input_ids.size(-1)
+                logits_processor = LogitsProcessorList([StopAfterEosTextGenerated(base_len, tokenizer.eos_token_id)])
 
+                num_input_tokens = inputs.input_ids.size(-1)
+                if verbose:
+                    print('Text Input: \n', prompt)
+                    print("Input Tokens:\n", input_ids)
+                    print("Attention Mask:\n", attention_mask)
+                print("Num of Input Tokens: ", num_input_tokens)
+                if num_input_tokens + MAX_NEW_TOKEN > 2048:
+                    max_new_token = 2048 - num_input_tokens
+                    print(f'max_new_token is reduced to {max_new_token} because of the limit of max context length 2048 and the input token {num_input_tokens}' )
+                else:
+                    max_new_token = MAX_NEW_TOKEN
                 if temperature < 1e-4:
                     do_sample = False
                 else:
                     do_sample = True
-
+                
                 # some models may error out when generating long outputs
                 try:
                     output_ids = model.generate(
-                        torch.as_tensor(input_ids).cuda(),
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        bos_token_id=tokenizer.pad_token_id,
+                        eos_token_id=tokenizer.eos_token_id,
+                        pad_token_id=tokenizer.pad_token_id,
                         do_sample=do_sample,
                         temperature=temperature,
                         max_new_tokens=max_new_token,
+                        logits_processor=logits_processor,
                     )
+                    
                     if model.config.is_encoder_decoder:
                         output_ids = output_ids[0]
                     else:
                         output_ids = output_ids[0][len(input_ids[0]) :]
-
+                    
+                    print("Num of Generated Tokens: ", output_ids.size(-1))
                     # be consistent with the template's stop_token_ids
                     if conv.stop_token_ids:
                         stop_token_ids_index = [
@@ -140,7 +196,7 @@ def get_model_answers(
                         ]
                         if len(stop_token_ids_index) > 0:
                             output_ids = output_ids[: stop_token_ids_index[0]]
-
+                    
                     output = tokenizer.decode(
                         output_ids,
                         spaces_between_special_tokens=False,
@@ -165,10 +221,14 @@ def get_model_answers(
                         else:
                             output = output.replace(special_token, "")
                     output = output.strip()
-
+                    
                     if conv.name == "xgen" and output.startswith("Assistant:"):
                         output = output.replace("Assistant:", "", 1).strip()
+                    if verbose:
+                        print("Generated Tokens:\n", output_ids)
+                        print("Generated Text:\n", output)
                 except RuntimeError as e:
+                    print(e)
                     print("ERROR question ID: ", question["question_id"])
                     output = "ERROR"
 

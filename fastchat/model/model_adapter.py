@@ -2103,8 +2103,33 @@ class SolarAdapter(BaseModelAdapter):
         return get_conv_template("solar")
 
 
+class OpenMoeChatAdapter(BaseModelAdapter):
+    """The model adapter for OpenMoE Chat Version"""
+
+    def match(self, model_path: str):
+        # if model_path satisfy the condition below, this adapter will be used.
+        return "openmoe" in model_path.lower() and "chat" in model_path.lower() 
+
+    def load_model(self, model_path: str, from_pretrained_kwargs: dict):
+        revision = from_pretrained_kwargs.get("revision", "main")
+        tokenizer = AutoTokenizer.from_pretrained(model_path,
+                                                     revision=revision,
+                                                     trust_remote_code=True,
+                                                     legacy=False,
+                                                     verbose=False)
+        model = AutoModelForCausalLM.from_pretrained(
+            model_path,
+            trust_remote_code=True,
+            **from_pretrained_kwargs,
+        )
+        return model, tokenizer
+
+    def get_default_conv_template(self, model_path: str) -> Conversation:
+        return get_conv_template("openmoe-chat")
+    
 # Note: the registration order matters.
 # The one registered earlier has a higher matching priority.
+register_model_adapter(OpenMoeChatAdapter)
 register_model_adapter(PeftModelAdapter)
 register_model_adapter(StableVicunaAdapter)
 register_model_adapter(VicunaAdapter)
