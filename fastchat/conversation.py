@@ -1413,7 +1413,7 @@ register_conv_template(
     Conversation(
         name="openmoe-chat",
         system_template="<<SYS>>\n{system_message}\n<</SYS>>\n\n<s>[INST]",
-        system_message="You are a helpful, respectful and honest assistant.",
+        system_message="You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe. Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.",
         roles=("[INST]", "[/INST]"),
         sep_style=SeparatorStyle.LLAMA2,
         sep=" ",
